@@ -27,7 +27,7 @@ public class JsEnv : ModuleRules
         SupportedV8Versions.VDeprecated;
 #endif
 
-    private bool UseNodejs = false;
+    private bool UseNodejs = true;
 
     private bool Node16 = true;
 
@@ -59,7 +59,7 @@ public class JsEnv : ModuleRules
         PublicDefinitions.Add("USING_IN_UNREAL_ENGINE");
         //PublicDefinitions.Add("WITH_V8_FAST_CALL");
         
-        PublicDefinitions.Add("TS_BLUEPRINT_PATH=\"/Blueprints/TypeScript/\"");
+        PublicDefinitions.Add("TS_BLUEPRINT_PATH=\"/Blueprints/JavaScript/\"");
         
         PublicDefinitions.Add(ThreadSafe ? "THREAD_SAFE" : "NOT_THREAD_SAFE");
 

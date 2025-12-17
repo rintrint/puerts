@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "description": "PuertsEditor",
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.puerts.json",
     "postbuild": "copy ..\\Content\\JavaScript\\PuertsEditor\\* ..\\..\\..\\Content\\JavaScript\\PuertsEditor\\"
   },
   "dependencies": {

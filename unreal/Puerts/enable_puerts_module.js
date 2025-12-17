@@ -7,7 +7,7 @@ const execSync = require('child_process').execSync;
 const jsSourcePath = path.join(__dirname, 'Content/JavaScript');
 const jsBasePath = path.join(__dirname, '../../Content/JavaScript');
 const tsModulePath = path.join(jsBasePath, 'PuertsEditor/node_modules/typescript');
-const tsconfigFilePath =  path.join(__dirname, '../../tsconfig.json');
+const tsconfigFilePath =  path.join(__dirname, '../../tsconfig.puerts.json');
 const puertsConfigPath = path.join(__dirname, '../../Config/DefaultPuerts.ini');
 const tsSroucePath = path.join(__dirname, '../../TypeScript');
 
@@ -79,7 +79,7 @@ if (!fs.existsSync(jsBasePath)) {
 }
 
 if (!fs.existsSync(tsconfigFilePath)) {
-    console.log('emit tsconfig.json');
+    console.log('emit tsconfig.puerts.json');
     fs.writeFileSync(tsconfigFilePath, JSON.stringify(jsDefaultConfig, null, 4));
 } else {
     console.warn('Warning: ' + tsconfigFilePath + " existed!");

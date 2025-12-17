@@ -1,4 +1,6 @@
+return;
 "use strict";
+console.warn("========== Puerts CodeAnalyze.js: I AM LOADING! =========="); // <--- 新增這行
 Object.defineProperty(exports, "__esModule", { value: true });
 const UE = require("ue");
 const puerts_1 = require("puerts");
@@ -79,8 +81,12 @@ function logErrors(allDiagnostics) {
         let message = ts.flattenDiagnosticMessageText(diagnostic.messageText, "\n");
         if (diagnostic.file) {
             let { line, character } = diagnostic.file.getLineAndCharacterOfPosition(diagnostic.start);
+            // 新增這行錯誤輸出
+            console.error(`[Puerts TS Error] ${diagnostic.file.fileName} (${line + 1},${character + 1}): ${message}`);
         }
         else {
+            // 新增這行錯誤輸出
+            console.error(`[Puerts TS Error] ${message}`);
         }
     });
 }
@@ -195,18 +201,34 @@ const ELifetimeCondition = {
     "COND_SkipReplay": 13,
     "COND_Never": 15, // This property will never be replicated						
 };
+// ========== 修正讀取 Config 的基準路徑 ==========
+
 function readAndParseConfigFile(configFilePath) {
     let readResult = ts.readConfigFile(configFilePath, customSystem.readFile);
+
+    // 關鍵修正：取得 config 檔案所在的資料夾路徑 (即 Content/JavaScript)
+    let configDir = tsi.getDirectoryPath(configFilePath);
+
     return ts.parseJsonConfigFileContent(readResult.config, {
         useCaseSensitiveFileNames: true,
         readDirectory: customSystem.readDirectory,
         fileExists: customSystem.fileExists,
         readFile: customSystem.readFile,
         trace: s => { }
-    }, customSystem.getCurrentDirectory());
+    }, configDir); // <--- 這裡原本是 customSystem.getCurrentDirectory()，現在改為 configDir
 }
 function watch(configFilePath) {
+    console.warn(`[Puerts DEBUG] Watch started. Config: ${configFilePath}`); // <--- 新增這行
     let { fileNames, options } = readAndParseConfigFile(configFilePath);
+    // <--- 新增下面這段 ---
+    console.warn(`[Puerts DEBUG] Found ${fileNames.length} TS files in config.`);
+    if (fileNames.length === 0) {
+        console.error("[Puerts ERROR] No files found! Check your tsconfig include path!");
+    } else {
+        console.warn(`[Puerts DEBUG] First file: ${fileNames[0]}`);
+    }
+    console.warn(`[Puerts DEBUG] Compiler Options - outDir: ${options.outDir}, noEmit: ${options.noEmit}`);
+    // --------------------
     const versionsFilePath = tsi.getDirectoryPath(configFilePath) + "/ts_file_versions_info.json";
     const fileVersions = {};
     let beginTime = new Date().getTime();
@@ -450,12 +472,15 @@ function watch(configFilePath) {
         }
     }
     function onSourceFileAddOrChange(sourceFilePath, reload, program, doEmitJs = true, doEmitBP = true) {
+        console.warn(`[Puerts DEBUG] Analyzing file: ${sourceFilePath}`); // <--- 新增 Log
+
         if (!program) {
             let beginTime = new Date().getTime();
             program = getProgramFromService();
         }
         let sourceFile = program.getSourceFile(sourceFilePath);
         if (sourceFile) {
+            // ... (原本的 diagnostics 代碼保持不變) ...
             const diagnostics = [
                 ...program.getSyntacticDiagnostics(sourceFile),
                 ...program.getSemanticDiagnostics(sourceFile)
@@ -463,6 +488,7 @@ function watch(configFilePath) {
             let checker = program.getTypeChecker();
             if (diagnostics.length > 0) {
                 logErrors(diagnostics);
+                console.error(`[Puerts ERROR] TypeScript errors found in ${sourceFilePath}`); // <--- 新增 Log
             }
             else {
                 if (doEmitBP) {
@@ -471,6 +497,15 @@ function watch(configFilePath) {
                 fileVersions[sourceFilePath].processed = true;
                 if (!sourceFile.isDeclarationFile) {
                     let emitOutput = service.getEmitOutput(sourceFilePath);
+
+                    // <--- 新增 Debug Log ---
+                    if (emitOutput.emitSkipped) {
+                        console.error(`[Puerts ERROR] Emit Skipped for ${sourceFilePath}! Check noEmit settings.`);
+                    } else {
+                        console.warn(`[Puerts DEBUG] Emit Success. Analyzing AST for UClass...`);
+                    }
+                    // ---------------------
+
                     if (!emitOutput.emitSkipped) {
                         let modulePath = undefined;
                         let moduleFileName = undefined;
@@ -481,9 +516,25 @@ function watch(configFilePath) {
                             }
                             if (output.name.endsWith(".js") || output.name.endsWith(".mjs")) {
                                 jsSource = output.text;
+                                // ... 在 CodeAnalyze.js 中找到這一段 ...
+
                                 if (options.outDir && output.name.startsWith(options.outDir)) {
                                     moduleFileName = output.name.substr(options.outDir.length + 1);
-                                    modulePath = tsi.getDirectoryPath(moduleFileName);
+
+                                    // 原本的寫法：直接使用相對路徑
+                                    // modulePath = tsi.getDirectoryPath(moduleFileName);
+
+                                    // ★★★ 修改後的寫法：強制加上前綴 "dist" ★★★
+                                    // 這樣 MyHelloActor 就會生成在 Content/dist/Actors/ 下
+                                    let relativeDir = tsi.getDirectoryPath(moduleFileName);
+                                    // 如果是根目錄，relativeDir 可能是空字串或 "."，需處理一下格式
+                                    if (relativeDir === "." || relativeDir === "") {
+                                        modulePath = "dist";
+                                    } else {
+                                        modulePath = "dist/" + relativeDir;
+                                    }
+                                    console.warn(`[Puerts DEBUG] modulePath: ${modulePath}`);
+
                                     moduleFileName = tsi.removeExtension(moduleFileName, output.name.endsWith(".js") ? ".js" : ".mjs");
                                 }
                             }
@@ -495,46 +546,112 @@ function watch(configFilePath) {
                             return;
                         let foundType = undefined;
                         let foundBaseTypeUClass = undefined;
+                        // ========== 開始 Debug 替換區塊 ==========
+                        console.warn(`[Puerts DEBUG] Starting AST Scan for ${sourceFilePath}`);
+
                         ts.forEachChild(sourceFile, (node) => {
+                            let type = undefined;
+                            let debugStep = "";
+
+                            // 1. 嘗試識別類型
                             if (ts.isExportAssignment(node) && ts.isIdentifier(node.expression)) {
-                                const type = checker.getTypeAtLocation(node.expression);
-                                if (!type || !type.getSymbol())
-                                    return;
-                                if (type.getSymbol().getName() != tsi.getBaseFileName(moduleFileName)) {
-                                    return;
-                                }
-                                let baseTypes = type.getBaseTypes();
-                                if (!baseTypes || baseTypes.length != 1)
-                                    return;
-                                let structOfType = getUClassOfType(baseTypes[0]);
-                                let baseTypeUClass = undefined;
-                                if (!structOfType) {
-                                    return;
-                                }
-                                if (structOfType.GetClass().IsChildOf(UE.Class.StaticClass())) {
-                                    baseTypeUClass = structOfType;
-                                }
-                                else {
-                                    return;
-                                }
-                                if (baseTypeUClass) {
-                                    if (isSubclassOf(type, "Subsystem")) {
-                                        return;
-                                    }
-                                    if (!baseTypeUClass.IsNative()) {
-                                        let moduleNames = getModuleNames(baseTypes[0]);
-                                        if (moduleNames.length > 1 && moduleNames[0] == 'ue') {
-                                            return;
-                                        }
-                                    }
-                                    foundType = type;
-                                    foundBaseTypeUClass = baseTypeUClass;
-                                }
-                                else {
+                                debugStep = "ExportAssignment";
+                                const t = checker.getTypeAtLocation(node.expression);
+                                if (t && t.getSymbol()) type = t;
+                            }
+                            else if (ts.isClassDeclaration(node) && node.name) {
+                                debugStep = "ClassDeclaration";
+                                let symbol = checker.getSymbolAtLocation(node.name);
+                                if (symbol) {
+                                    // type = checker.getTypeOfSymbolAtLocation(symbol, node);
+                                    // 改用 getTypeAtLocation 直接獲取 ClassDeclaration 的類型，這會得到 "Instance Type"
+                                    // Instance Type 的繼承關係通常比 Constructor Type 更穩定
+                                    type = checker.getTypeAtLocation(node);
                                 }
                             }
+
+                            // 如果不是我們要找的節點，直接跳過，不印 Log 避免洗版
+                            if (!type) return;
+
+                            console.warn(`[Puerts DEBUG] Found candidate node: ${debugStep}`);
+
+                            // 2. 檢查 Symbol
+                            if (!type.getSymbol()) {
+                                console.error(`[Puerts DEBUG] Failed: Type has no symbol.`);
+                                return;
+                            }
+
+                            // 3. 檢查名稱是否與檔名一致
+                            let typeName = type.getSymbol().getName();
+                            const fileNameBase = tsi.getBaseFileName(moduleFileName);
+
+                            // ★★★ 關鍵修正：如果是 default export，自動視為匹配 ★★★
+                            if (typeName === "default") {
+                                console.warn(`[Puerts DEBUG] TypeName is 'default', treating it as '${fileNameBase}'`);
+                                typeName = fileNameBase; // 強制修正名稱，讓後面通過
+                            }
+
+                            console.warn(`[Puerts DEBUG] Check Name: TypeName='${typeName}' vs FileName='${fileNameBase}'`);
+
+                            if (typeName != fileNameBase) {
+                                console.error(`[Puerts DEBUG] Failed: Name mismatch.`);
+                                return;
+                            }
+
+                            // 4. 檢查繼承關係 (Base Types)
+                            let baseTypes = type.getBaseTypes();
+                            console.warn(`[Puerts DEBUG] Check BaseTypes: Count=${baseTypes ? baseTypes.length : 0}`);
+
+                            if (!baseTypes || baseTypes.length != 1) {
+                                console.error(`[Puerts DEBUG] Failed: Base types count is not 1.`);
+                                return;
+                            }
+
+                            // 5. 檢查父類別是否為 UClass
+                            let structOfType = getUClassOfType(baseTypes[0]);
+                            console.warn(`[Puerts DEBUG] Check Parent UClass: ${structOfType ? structOfType.GetName() : "undefined"}`);
+
+                            let baseTypeUClass = undefined;
+                            if (!structOfType) {
+                                console.error(`[Puerts DEBUG] Failed: Parent is not a valid UClass.`);
+                                return;
+                            }
+
+                            // 6. 檢查是否繼承自 UE.Class
+                            // 注意: UE.GameInstance 也是 UObject，這裡的檢查邏輯有點繞
+                            // structOfType.GetClass() 應該回傳 "Class"
+                            let parentMetaClass = structOfType.GetClass();
+                            console.warn(`[Puerts DEBUG] Check MetaClass: ${parentMetaClass.GetName()}`);
+
+                            if (parentMetaClass.IsChildOf(UE.Class.StaticClass())) {
+                                baseTypeUClass = structOfType;
+                            }
+                            else {
+                                console.error(`[Puerts DEBUG] Failed: Parent MetaClass is not Child Of UE.Class.`);
+                                return;
+                            }
+
+                            // 7. 最後檢查
+                            if (baseTypeUClass) {
+                                if (isSubclassOf(type, "Subsystem")) {
+                                    console.error(`[Puerts DEBUG] Failed: Is Subsystem.`);
+                                    return;
+                                }
+                                if (!baseTypeUClass.IsNative()) {
+                                    let moduleNames = getModuleNames(baseTypes[0]);
+                                    if (moduleNames.length > 1 && moduleNames[0] == 'ue') {
+                                        console.error(`[Puerts DEBUG] Failed: Non-native UE class.`);
+                                        return;
+                                    }
+                                }
+                                foundType = type;
+                                foundBaseTypeUClass = baseTypeUClass;
+                                console.warn(`[Puerts DEBUG] >>> SUCCESS <<< Found Type: ${typeName}`);
+                            }
                         });
+                        // ========== 結束 Debug 替換區塊 ==========
                         if (foundType && foundBaseTypeUClass) {
+                            console.warn(`[Puerts DEBUG] FOUND BLUEPRINT CLASS! Type: ${checker.typeToString(foundType)}`); // <--- 成功訊號
                             fileVersions[sourceFilePath].isBP = true;
                             //onBlueprintTypeAddOrChange(foundBaseTypeUClass, foundType, modulePath);
                             pendingBlueprintRefleshJobs.push({ type: foundType, op: () => onBlueprintTypeAddOrChange(foundBaseTypeUClass, foundType, modulePath) });
@@ -815,9 +932,31 @@ function watch(configFilePath) {
                 return ret;
             }
             function onBlueprintTypeAddOrChange(baseTypeUClass, type, modulePath) {
+                // ========== 新增：修正 default 名稱問題 ==========
+                let clsName = type.getSymbol().getName();
+
+                if (clsName === 'default') {
+                    // 如果類別名稱是 default，我們就往回追溯它的檔案名稱
+                    if (type.symbol && type.symbol.valueDeclaration) {
+                        try {
+                            let sourceFile = type.symbol.valueDeclaration.getSourceFile();
+                            if (sourceFile && sourceFile.fileName) {
+                                // 從完整路徑取得檔名 (例如 Main.ts -> Main)
+                                clsName = tsi.removeFileExtension(tsi.getBaseFileName(sourceFile.fileName));
+                                console.warn(`[Puerts DEBUG] Auto-renaming 'default' class to '${clsName}' based on filename.`);
+                            }
+                        } catch (e) {
+                            console.error("[Puerts DEBUG] Failed to infer class name from filename: " + e);
+                        }
+                    }
+                }
+                // ===============================================
+
                 let lsFunctionLibrary = baseTypeUClass && baseTypeUClass.GetName() === "BlueprintFunctionLibrary";
                 let bp = new UE.PEBlueprintAsset();
-                bp.LoadOrCreateWithMetaData(type.getSymbol().getName(), modulePath, baseTypeUClass, 0, 0, uemeta.compileClassMetaData(type));
+                // bp.LoadOrCreateWithMetaData(type.getSymbol().getName(), modulePath, baseTypeUClass, 0, 0, uemeta.compileClassMetaData(type));
+                // ★★★ 請把第一個參數改成 clsName ★★★
+                bp.LoadOrCreateWithMetaData(clsName, modulePath, baseTypeUClass, 0, 0, uemeta.compileClassMetaData(type));
                 let hasConstructor = false;
                 let properties = [];
                 type.symbol.valueDeclaration.forEachChild(x => {
@@ -829,11 +968,11 @@ function watch(configFilePath) {
                         if (!isStatic && lsFunctionLibrary) {
                             return;
                         }
-                        if (x.name.getText() === 'ReceiveInit') {
-                            if (baseTypeUClass == UE.GameInstance.StaticClass() || baseTypeUClass.IsChildOf(UE.GameInstance.StaticClass())) {
-                                return;
-                            }
-                        }
+                        // if (x.name.getText() === 'ReceiveInit') {
+                        //     if (baseTypeUClass == UE.GameInstance.StaticClass() || baseTypeUClass.IsChildOf(UE.GameInstance.StaticClass())) {
+                        //         return;
+                        //     }
+                        // }
                         properties.push(checker.getSymbolAtLocation(x.name));
                     }
                     else if (ts.isPropertyDeclaration(x) && !manualSkip(x)) {
@@ -848,121 +987,131 @@ function watch(configFilePath) {
                 properties
                     .filter(x => ts.isClassDeclaration(x.valueDeclaration.parent) && checker.getSymbolAtLocation(x.valueDeclaration.parent.name) == type.symbol)
                     .forEach((symbol) => {
-                    if (ts.isMethodDeclaration(symbol.valueDeclaration)) {
-                        if (symbol.getName() === 'Constructor') {
-                            hasConstructor = true;
-                            return;
-                        }
-                        let methodType = checker.getTypeOfSymbolAtLocation(symbol, symbol.valueDeclaration);
-                        let signatures = checker.getSignaturesOfType(methodType, ts.SignatureKind.Call);
-                        if (!signatures) {
-                            return;
-                        }
-                        if (signatures.length != 1) {
-                            return;
-                        }
-                        let signature = signatures[0];
-                        for (var i = 0; i < signature.parameters.length; i++) {
-                            let paramType = checker.getTypeOfSymbolAtLocation(signature.parameters[i], signature.parameters[i].valueDeclaration);
-                            let paramPinType = tsTypeToPinType(paramType, getSymbolTypeNode(signature.parameters[i]));
-                            if (!paramPinType) {
-                                bp.ClearParameter();
+                        if (ts.isMethodDeclaration(symbol.valueDeclaration)) {
+                            if (symbol.getName() === 'Constructor') {
+                                hasConstructor = true;
                                 return;
                             }
-                            postProcessPinType(signature.parameters[i].valueDeclaration, paramPinType.pinType, false);
-                            // bp.AddParameter(signature.parameters[i].getName(), paramPinType.pinType, paramPinType.pinValueType);
-                            bp.AddParameterWithMetaData(signature.parameters[i].getName(), paramPinType.pinType, paramPinType.pinValueType, uemeta.compileParamMetaData(signature.parameters[i]));
-                        }
-                        let sflags = tryGetAnnotation(symbol.valueDeclaration, "flags", true);
-                        let flags = getFlagsValue(sflags, FunctionFlags);
-                        let clearFlags = 0;
-                        if (symbol.valueDeclaration && symbol.valueDeclaration.decorators) {
-                            flags |= Number(getDecoratorFlagsValue(symbol.valueDeclaration, "flags", FunctionFlags));
-                            flags |= Number(getDecoratorFlagsValue(symbol.valueDeclaration, "set_flags", FunctionFlags));
-                            clearFlags = Number(getDecoratorFlagsValue(symbol.valueDeclaration, "clear_flags", FunctionFlags));
-                        }
-                        if (symbol.valueDeclaration.type && (ts.SyntaxKind.VoidKeyword === symbol.valueDeclaration.type.kind)) {
-                            // bp.AddFunction(symbol.getName(), true, undefined, undefined, flags, clearFlags);
-                            bp.AddFunctionWithMetaData(symbol.getName(), true, undefined, undefined, flags, clearFlags, uemeta.compileFunctionMetaData(symbol));
-                        }
-                        else {
-                            let returnType = signature.getReturnType();
-                            let resultPinType = tsTypeToPinType(returnType, getSymbolTypeNode(symbol));
-                            if (!resultPinType) {
-                                bp.ClearParameter();
+                            let methodType = checker.getTypeOfSymbolAtLocation(symbol, symbol.valueDeclaration);
+                            let signatures = checker.getSignaturesOfType(methodType, ts.SignatureKind.Call);
+                            if (!signatures) {
                                 return;
                             }
-                            postProcessPinType(symbol.valueDeclaration, resultPinType.pinType, true);
-                            // bp.AddFunction(symbol.getName(), false, resultPinType.pinType, resultPinType.pinValueType, flags, clearFlags);
-                            bp.AddFunctionWithMetaData(symbol.getName(), false, resultPinType.pinType, resultPinType.pinValueType, flags, clearFlags, uemeta.compileFunctionMetaData(symbol));
-                        }
-                        bp.ClearParameter();
-                    }
-                    else {
-                        let propType = checker.getTypeOfSymbolAtLocation(symbol, symbol.valueDeclaration);
-                        let propPinType = tsTypeToPinType(propType, getSymbolTypeNode(symbol));
-                        if (!propPinType) {
-                        }
-                        else {
-                            postProcessPinType(symbol.valueDeclaration, propPinType.pinType, true);
+                            if (signatures.length != 1) {
+                                return;
+                            }
+                            let signature = signatures[0];
+                            for (var i = 0; i < signature.parameters.length; i++) {
+                                let paramType = checker.getTypeOfSymbolAtLocation(signature.parameters[i], signature.parameters[i].valueDeclaration);
+                                let paramPinType = tsTypeToPinType(paramType, getSymbolTypeNode(signature.parameters[i]));
+                                if (!paramPinType) {
+                                    bp.ClearParameter();
+                                    return;
+                                }
+                                postProcessPinType(signature.parameters[i].valueDeclaration, paramPinType.pinType, false);
+                                // bp.AddParameter(signature.parameters[i].getName(), paramPinType.pinType, paramPinType.pinValueType);
+                                bp.AddParameterWithMetaData(signature.parameters[i].getName(), paramPinType.pinType, paramPinType.pinValueType, uemeta.compileParamMetaData(signature.parameters[i]));
+                            }
                             let sflags = tryGetAnnotation(symbol.valueDeclaration, "flags", true);
-                            let localFlags = BigInt(getFlagsValue(sflags, PropertyFlags)); // From //@flags
-                            let cond = 0;
-
+                            let flags = getFlagsValue(sflags, FunctionFlags);
+                            let clearFlags = 0;
                             if (symbol.valueDeclaration && symbol.valueDeclaration.decorators) {
-                                // Handle @flags() decorator
-                                localFlags |= getDecoratorFlagsValue(symbol.valueDeclaration, "flags", PropertyFlags);
-
-                                // Handle @condition() for CPF_Net
-                                cond = Number(getDecoratorFlagsValue(symbol.valueDeclaration, "condition", ELifetimeCondition));
-                                if (cond != 0) {
-                                    localFlags |= BigInt(PropertyFlags.CPF_Net); 
-                                }
-
-                                // Handle specific @edit_on_instance decorator as an override
-                                if (hasDecorator(symbol.valueDeclaration, "edit_on_instance")) {
-                                    localFlags &= ~BigInt(PropertyFlags.CPF_DisableEditOnInstance); // Remove restriction
-                                    localFlags |= BigInt(PropertyFlags.CPF_Edit); // Ensure it's editable if this is used
-                                }
-                                
-                                // Attachment logic (preserved)
-                                symbol.valueDeclaration.decorators.forEach((decorator) => {
-                                    let expression = decorator.expression;
-                                    if (ts.isCallExpression(expression)) {
-                                        if (expression.expression.getFullText().endsWith("uproperty.attach")) {
-                                            expression.arguments.forEach((value) => {
-                                                attachments.Add(symbol.getName(), value.getFullText().slice(1, -1));
-                                            });
-                                        }
-                                    }
-                                });
+                                flags |= Number(getDecoratorFlagsValue(symbol.valueDeclaration, "flags", FunctionFlags));
+                                flags |= Number(getDecoratorFlagsValue(symbol.valueDeclaration, "set_flags", FunctionFlags));
+                                clearFlags = Number(getDecoratorFlagsValue(symbol.valueDeclaration, "clear_flags", FunctionFlags));
                             }
-
-                            let propertyMetaData = uemeta.compilePropertyMetaData(symbol);
-
-                            // If UEMeta provides no metadata (e.g. no @uproperty decorator on the member) AND
-                            // localFlags themselves don't already make the property editable, 
-                            // then apply a default CPF_DisableEditOnInstance to localFlags.
-                            // This makes un-decorated or un-annotated properties non-editable on instances by default.
-                            if (!propertyMetaData && !(localFlags & BigInt(PropertyFlags.CPF_Edit))) {
-                                // Check hasDecorator again because the main decorators loop might not have run if no decorators exist at all
-                                if (!symbol.valueDeclaration || !symbol.valueDeclaration.decorators || !hasDecorator(symbol.valueDeclaration, "edit_on_instance")) { 
-                                     localFlags |= BigInt(PropertyFlags.CPF_DisableEditOnInstance);
-                                }
+                            if (symbol.valueDeclaration.type && (ts.SyntaxKind.VoidKeyword === symbol.valueDeclaration.type.kind)) {
+                                // bp.AddFunction(symbol.getName(), true, undefined, undefined, flags, clearFlags);
+                                bp.AddFunctionWithMetaData(symbol.getName(), true, undefined, undefined, flags, clearFlags, uemeta.compileFunctionMetaData(symbol));
                             }
-                            // When propertyMetaData *is* present, its internal flags (derived by UEMeta.js from EditAnywhere etc.)
-                            // are authoritative. localFlags here are for truly additional/override flags.
-
-                            bp.AddMemberVariableWithMetaData(symbol.getName(), propPinType.pinType, propPinType.pinValueType, Number(localFlags & 0xffffffffn), Number(localFlags >> 32n), cond, propertyMetaData);
+                            else {
+                                let returnType = signature.getReturnType();
+                                let resultPinType = tsTypeToPinType(returnType, getSymbolTypeNode(symbol));
+                                if (!resultPinType) {
+                                    bp.ClearParameter();
+                                    return;
+                                }
+                                postProcessPinType(symbol.valueDeclaration, resultPinType.pinType, true);
+                                // bp.AddFunction(symbol.getName(), false, resultPinType.pinType, resultPinType.pinValueType, flags, clearFlags);
+                                bp.AddFunctionWithMetaData(symbol.getName(), false, resultPinType.pinType, resultPinType.pinValueType, flags, clearFlags, uemeta.compileFunctionMetaData(symbol));
+                            }
+                            bp.ClearParameter();
                         }
-                    }
-                });
+                        else {
+                            let propType = checker.getTypeOfSymbolAtLocation(symbol, symbol.valueDeclaration);
+                            let propPinType = tsTypeToPinType(propType, getSymbolTypeNode(symbol));
+                            if (!propPinType) {
+                            }
+                            else {
+                                postProcessPinType(symbol.valueDeclaration, propPinType.pinType, true);
+                                let sflags = tryGetAnnotation(symbol.valueDeclaration, "flags", true);
+                                let localFlags = BigInt(getFlagsValue(sflags, PropertyFlags)); // From //@flags
+                                let cond = 0;
+
+                                if (symbol.valueDeclaration && symbol.valueDeclaration.decorators) {
+                                    // Handle @flags() decorator
+                                    localFlags |= getDecoratorFlagsValue(symbol.valueDeclaration, "flags", PropertyFlags);
+
+                                    // Handle @condition() for CPF_Net
+                                    cond = Number(getDecoratorFlagsValue(symbol.valueDeclaration, "condition", ELifetimeCondition));
+                                    if (cond != 0) {
+                                        localFlags |= BigInt(PropertyFlags.CPF_Net);
+                                    }
+
+                                    // Handle specific @edit_on_instance decorator as an override
+                                    if (hasDecorator(symbol.valueDeclaration, "edit_on_instance")) {
+                                        localFlags &= ~BigInt(PropertyFlags.CPF_DisableEditOnInstance); // Remove restriction
+                                        localFlags |= BigInt(PropertyFlags.CPF_Edit); // Ensure it's editable if this is used
+                                    }
+
+                                    // Attachment logic (preserved)
+                                    symbol.valueDeclaration.decorators.forEach((decorator) => {
+                                        let expression = decorator.expression;
+                                        if (ts.isCallExpression(expression)) {
+                                            if (expression.expression.getFullText().endsWith("uproperty.attach")) {
+                                                expression.arguments.forEach((value) => {
+                                                    attachments.Add(symbol.getName(), value.getFullText().slice(1, -1));
+                                                });
+                                            }
+                                        }
+                                    });
+                                }
+
+                                let propertyMetaData = uemeta.compilePropertyMetaData(symbol);
+
+                                // If UEMeta provides no metadata (e.g. no @uproperty decorator on the member) AND
+                                // localFlags themselves don't already make the property editable, 
+                                // then apply a default CPF_DisableEditOnInstance to localFlags.
+                                // This makes un-decorated or un-annotated properties non-editable on instances by default.
+                                if (!propertyMetaData && !(localFlags & BigInt(PropertyFlags.CPF_Edit))) {
+                                    // Check hasDecorator again because the main decorators loop might not have run if no decorators exist at all
+                                    if (!symbol.valueDeclaration || !symbol.valueDeclaration.decorators || !hasDecorator(symbol.valueDeclaration, "edit_on_instance")) {
+                                        localFlags |= BigInt(PropertyFlags.CPF_DisableEditOnInstance);
+                                    }
+                                }
+                                // When propertyMetaData *is* present, its internal flags (derived by UEMeta.js from EditAnywhere etc.)
+                                // are authoritative. localFlags here are for truly additional/override flags.
+
+                                bp.AddMemberVariableWithMetaData(symbol.getName(), propPinType.pinType, propPinType.pinValueType, Number(localFlags & 0xffffffffn), Number(localFlags >> 32n), cond, propertyMetaData);
+                            }
+                        }
+                    });
                 bp.RemoveNotExistedComponent();
                 bp.RemoveNotExistedMemberVariable();
                 bp.RemoveNotExistedFunction();
                 bp.SetupAttachments(attachments);
                 bp.HasConstructor = hasConstructor;
                 bp.Save();
+
+                // ★★★ 修正版：移除會報錯的 GetPathName，改用簡單 Log ★★★
+                console.warn(`[Puerts DEBUG] ==================================================`);
+                console.warn(`[Puerts DEBUG] 🏗️  Blueprint Generated Successfully!`);
+                // 我們直接顯示計算出的路徑，不呼叫導致崩潰的 API
+                console.warn(`[Puerts DEBUG] 🔗 Linked JS Module (Path): ${modulePath}/${clsName}`);
+                console.warn(`[Puerts DEBUG]    (Engine will look for: Content/JavaScript/${modulePath}/${clsName}.js)`);
+                console.warn(`[Puerts DEBUG] ==================================================`);
+
+                // ===============================================
             }
             function getModuleNames(type) {
                 let ret = [];
@@ -1008,23 +1157,46 @@ function watch(configFilePath) {
         return emitOutputFilePathWithoutExtension;
     }
     function list(pattern) {
+        console.warn(`[Puerts DEBUG] Executing 'ls' command. Pattern: ${pattern}`); // <--- 新增這行
         var re = new RegExp(pattern ? pattern : '.*');
+        var count = 0;
         for (var key in fileVersions) {
             var value = fileVersions[key];
             if (!pattern || re.test(key)) {
+                // <--- 這裡是空的！加上輸出邏輯 ---
+                console.warn(`[LS] File: ${key} | isBP: ${value.isBP} | Processed: ${value.processed} | Version: ${value.version}`);
+                count++;
+                // ------------------------------
             }
         }
+        console.warn(`[Puerts DEBUG] 'ls' command finished. Listed ${count} files.`); // <--- 新增這行
     }
-    function compile(id) {
+    function compile(arg) {
+        console.warn(`[Puerts DEBUG] Compile request for: ${arg}`);
+        var found = false;
+        var targetPath = arg.trim().replace(/\\/g, '/'); // 統一轉為正斜線
+
         for (var key in fileVersions) {
             var value = fileVersions[key];
-            if (value.version === id.trim()) {
-                onSourceFileAddOrChange(key, true);
+            var normalizedKey = key.replace(/\\/g, '/');
+
+            // 同時比對 Version ID 或 檔案路徑
+            if (value.version === arg.trim() || normalizedKey === targetPath) {
+                console.warn(`[Puerts DEBUG] Match found! Compiling: ${key}`);
+                // 這裡必須傳入 program，不然會重新創建導致效能低落或狀態不同步
+                onSourceFileAddOrChange(key, true, program, true, true);
+                found = true;
             }
         }
+
+        if (!found) {
+            console.error(`[Puerts ERROR] Could not find file matching: ${arg}`);
+        }
+
         refreshBlueprints();
     }
     function dispatchCmd(cmd, args) {
+        console.warn(`[Puerts DEBUG] Received Command: ${cmd}, Args: ${args}`); // <--- 新增這行
         if (cmd == 'ls') {
             list(args);
         }
@@ -1032,9 +1204,51 @@ function watch(configFilePath) {
             compile(args);
         }
         else {
+            console.warn(`[Puerts DEBUG] Unknown command: ${cmd}`); // <--- 新增這行
         }
     }
     cpp.FPuertsEditorModule.SetCmdCallback(dispatchCmd);
 }
-watch(customSystem.getCurrentDirectory() + "tsconfig.json");
+
+// 修改為優先讀取 puerts 專用設定
+// ========== 修正後的啟動邏輯 (針對 Content/JavaScript 路徑) ==========
+
+// 1. 取得專案根目錄 (Project Root)
+let projectRoot = customSystem.getCurrentDirectory();
+
+// 2. 組合出正確的 JavaScript 根目錄
+// 注意：我們明確指向 "Content/JavaScript"
+let jsRoot = tsi.combinePaths(projectRoot, "Content/JavaScript");
+
+console.warn(`[Puerts DEBUG] Project Root: ${projectRoot}`);
+console.warn(`[Puerts DEBUG] JS Root determined as: ${jsRoot}`);
+
+// 3. 設定檔案路徑
+let puertsConfigPath = tsi.combinePaths(jsRoot, "tsconfig.puerts.json");
+let standardConfigPath = tsi.combinePaths(jsRoot, "tsconfig.json");
+
+let finalConfigPath = standardConfigPath; // 預設值
+
+// 4. 檢查檔案是否存在 (優先使用 tsconfig.puerts.json)
+if (customSystem.fileExists(puertsConfigPath)) {
+    console.warn("[Puerts DEBUG] Found 'tsconfig.puerts.json', using it.");
+    finalConfigPath = puertsConfigPath;
+} else if (customSystem.fileExists(standardConfigPath)) {
+    console.warn("[Puerts DEBUG] Found 'tsconfig.json' in Content/JavaScript, using it.");
+    finalConfigPath = standardConfigPath;
+} else {
+    console.error("[Puerts CRITICAL] No tsconfig found in Content/JavaScript! Checking Project Root as fallback...");
+    // 萬一你的結構比較特殊，再退回去找根目錄
+    let rootPuerts = tsi.combinePaths(projectRoot, "tsconfig.puerts.json");
+    let rootStandard = tsi.combinePaths(projectRoot, "tsconfig.json");
+
+    if (customSystem.fileExists(rootPuerts)) finalConfigPath = rootPuerts;
+    else if (customSystem.fileExists(rootStandard)) finalConfigPath = rootStandard;
+}
+
+try {
+    watch(finalConfigPath);
+} catch (e) {
+    console.error("[Puerts CRITICAL ERROR] CodeAnalyze crashed: " + e.stack);
+}
 //# sourceMappingURL=CodeAnalyze.js.map

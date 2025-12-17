@@ -1178,4 +1178,4 @@ function watch(configFilePath:string) {
     cpp.FPuertsEditorModule.SetCmdCallback(dispatchCmd);
 }
 
-watch(customSystem.getCurrentDirectory() + "tsconfig.json");
+watch(customSystem.getCurrentDirectory() + "tsconfig.puerts.json");
